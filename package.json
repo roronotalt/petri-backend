@@ -1,0 +1,30 @@
+{
+    "name": "kassspay-backend",
+    "module": "index.ts",
+    "type": "module",
+    "private": true,
+    "scripts": {
+        "dev": "bun --watch src/index.ts",
+        "dev:watch-all": "bun --watch src/**/*.ts --run src/index.ts",
+        "start": "bun src/index.ts"
+    },
+    "devDependencies": {
+        "@types/bun": "latest"
+    },
+    "peerDependencies": {
+        "typescript": "^5.9.2"
+    },
+    "dependencies": {
+        "@kasssandra/kassspay": "^0.0.30-alpha",
+        "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
+        "@metaplex-foundation/umi": "^1.4.1",
+        "@sentry/node": "^10.14.0",
+        "@solana/kit": "^2.3.0",
+        "cron": "^4.3.3",
+        "dotenv": "^17.2.2",
+        "drizzle-orm": "^0.44.5",
+        "postgres": "^3.4.7",
+        "redis": "^5.8.2",
+        "zod": "^4.1.11"
+    }
+}

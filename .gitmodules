@@ -1,0 +1,3 @@
+[submodule "src/kassspay-connections"]
+	path = src/kassspay-connections
+	url = git@github.com:roronotalt/kassspay-connections.git
