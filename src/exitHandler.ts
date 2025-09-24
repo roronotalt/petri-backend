@@ -1,4 +1,4 @@
-import { pubClient } from "./kassspay-connections/pubsub";
+import { pubClient } from "./petri-connections/pubsub";
 
 export const exitHandler = (
     options: {

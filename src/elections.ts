@@ -4,7 +4,7 @@
  * if the leader dies, the next server to connect to the pubsub server will become the leader.
  * the leader is responsible for handling updates relating to the key.
  */
-import { pubClient } from "./kassspay-connections/pubsub";
+import { pubClient } from "./petri-connections/pubsub";
 
 const server_uuid = process.env.SERVER_UUID;
 if (!server_uuid) {
