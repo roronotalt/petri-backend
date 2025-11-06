@@ -2,27 +2,33 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import { Kparse, Kstringify, KWebsocketMethods } from "@kasssandra/kassspay";
 import {
-   private_player_data_schema,
+   global_logger,
+   INITIAL_PLAYER_RADIUS,
+   player_update_position_schema,
    pubsub_websocket_subscribe,
+   pubsub_websocket_unsubscribe,
    SubscriptionType,
+   TICK_FPS,
    type WebSocketHandler,
 } from "./stores";
 import { awaitRedisConnect, pubClient, subClient } from "./petri-connections/pubsub";
 import {
    client_join_game_schema,
+   client_update_position_schema,
+   join_game_response_schema,
    server_methods_schema,
    server_responses_schema,
+   tick_update_response_schema,
 } from "./shared_types";
 import { player_metadata_schema } from "./stores";
 import { ServerGameState } from "./serverGameState";
 import Bun from "bun";
-import { client_update_vector_schema } from "./shared_types";
 
 dotenv.config();
 await awaitRedisConnect();
 
 // @TODO: graceful shutdown
-async function deleteAllGameData() {
+const delete_all_game_data = async () => {
    let cursor: string = "0";
    do {
       const { cursor: new_cursor, keys } = await pubClient.scan(cursor, {
@@ -45,8 +51,8 @@ async function deleteAllGameData() {
          await pubClient.del(keys);
       }
    } while (cursor !== "0");
-}
-deleteAllGameData();
+};
+await delete_all_game_data();
 
 if (process.env.TICK_SERVER == "YES") {
    const server_game_state = new ServerGameState();
@@ -59,66 +65,83 @@ const join_game = async (
    params: z.infer<typeof client_join_game_schema>,
 ) => {
    const player_uuid = crypto.randomUUID();
-   pubClient.publish(
+   // error out after 10 seconds of no response to joining the game
+   const join_game_timer = setTimeout(async () => {
+      ws.send(
+         Kstringify({
+            id: sub_id,
+            type: "error",
+            error: { code: 408, message: "Joining the game timed out" },
+         } satisfies z.infer<typeof server_responses_schema>),
+      );
+      await pubsub_websocket_unsubscribe(ws, `player:${player_uuid}`);
+   }, 10000);
+
+   await pubsub_websocket_subscribe(ws, `player:${player_uuid}`, async (message) => {
+      const parsed_message = Kparse(message);
+
+      switch (parsed_message.method) {
+         case "join_game":
+            clearTimeout(join_game_timer);
+
+            ws.data.game_data = {
+               uuid: player_uuid,
+            };
+
+            //@TODO: set the position & heartbeat *as* the player is joining based on their mouse position on the client
+            // @TODO: better authentication system
+            await pubClient
+               .multi()
+               .set(`player:uuid:${player_uuid}`, params.secret_key)
+               .set(`player:secret_key:${params.secret_key}`, player_uuid)
+               .exec();
+            break;
+         case "tick_update":
+            break;
+      }
+
+      ws.send(
+         Kstringify({
+            id: sub_id,
+            type: "success",
+            data: parsed_message,
+         } satisfies z.infer<typeof server_responses_schema>),
+      );
+   });
+
+   await pubClient.publish(
       "player:join_game",
       Kstringify({
          uuid: player_uuid,
          username: params.name,
       } satisfies z.infer<typeof player_metadata_schema>),
    );
-
-   //@TODO: set the position & heartbeat *as* the player is joining based on their mouse position on the client
-   await pubClient.set(
-      `player:private:${params.secret_key}`,
-      Kstringify({
-         uuid: player_uuid,
-         vector: {
-            angle: 0,
-            magnitude: 0,
-            client_heartbeat: Date.now(),
-            server_heartbeat: Date.now(),
-         },
-      } satisfies z.infer<typeof private_player_data_schema>),
-   );
-
-   pubsub_websocket_subscribe(ws, `player:${player_uuid}`, (message) => {
-      ws.send(
-         Kstringify({
-            id: sub_id,
-            type: "success",
-            data: Kparse(message),
-         } satisfies z.infer<typeof server_responses_schema>),
-      );
-   });
 };
 
-const update_vector = async (
+const update_position = async (
    ws: WebSocketHandler,
    sub_id: string,
-   params: z.infer<typeof client_update_vector_schema>,
+   params: z.infer<typeof client_update_position_schema>,
 ) => {
    // @TODO: some sort of latency/network connection checks
-   const player_vector_string = await pubClient.get(`player:private:${params.secret_key}`);
-   if (player_vector_string == null) {
+   if (ws.data.game_data == null) {
       ws.send(
          Kstringify({
             id: sub_id,
+            type: "error",
             error: { code: 404, message: "Player not found" },
-         }),
+         } satisfies z.infer<typeof server_responses_schema>),
       );
+      return;
    }
 
-   await pubClient.set(
-      `player:private:${params.secret_key}`,
+   await pubClient.publish(
+      "player:update_position",
       Kstringify({
-         uuid: Kparse(player_vector_string!).uuid,
-         vector: {
-            angle: params.angle,
-            magnitude: params.magnitude,
-            client_heartbeat: params.client_heartbeat,
-            server_heartbeat: Date.now(),
-         },
-      } satisfies z.infer<typeof private_player_data_schema>),
+         uuid: ws.data.game_data.uuid,
+         x: params.x,
+         y: params.y,
+      } satisfies z.infer<typeof player_update_position_schema>),
    );
 };
 
@@ -129,6 +152,7 @@ Bun.serve<WebSocketHandler["data"]>({
             data: {
                subscriptions: new Map(),
                window_open: true,
+               game_data: null,
             },
          })
       ) {
@@ -181,8 +205,8 @@ Bun.serve<WebSocketHandler["data"]>({
             case "join_game":
                await join_game(ws, parsed.id, parsed.params);
                break;
-            case "update_vector":
-               await update_vector(ws, parsed.id, parsed.params);
+            case "update_position":
+               await update_position(ws, parsed.id, parsed.params);
                break;
          }
       },

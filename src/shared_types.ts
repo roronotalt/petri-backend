@@ -13,14 +13,22 @@ export const join_game_response_schema = z.object({
 export const tick_update_response_schema = z.object({
    method: z.literal("tick_update"),
    data: z.object({
-      relative_positions: z.array(
+      zoom_factor: z.number(),
+      self_blobs: z.array(
          z.object({
-            uuid: z.string(),
             x: z.number(),
             y: z.number(),
             r: z.number(),
-            angle: z.number(),
-            magnitude: z.number(),
+         }),
+      ),
+      other_blobs: z.record(
+         z.string(),
+         z.object({
+            x: z.number(),
+            y: z.number(),
+            r: z.number(),
+            vx: z.number(),
+            vy: z.number(),
          }),
       ),
    }),
@@ -45,13 +53,12 @@ export const server_responses_schema = z.discriminatedUnion("type", [
    }),
 ]);
 
-export const client_update_vector_schema = z.object({
-   secret_key: z.string().max(256),
+export const client_update_position_schema = z.object({
    client_heartbeat: z
       .number()
       .refine((val) => val <= Date.now(), { message: "Heartbeat must be in the past" }),
-   angle: z.number(),
-   magnitude: z.number(),
+   x: z.number(),
+   y: z.number(),
 });
 
 export const client_join_game_schema = z.object({
@@ -67,7 +74,17 @@ export const server_methods_schema = z.discriminatedUnion("method", [
    }),
    z.object({
       id: z.string().max(100),
-      method: z.literal("update_vector"),
-      params: client_update_vector_schema,
+      method: z.literal("update_position"),
+      params: client_update_position_schema,
    }),
 ]);
+
+export type BlobUUID = {
+   uuid: string;
+   blob_index: number; // blob array index
+};
+
+export const parse_blob_uuid = (blob_uuid: string): BlobUUID => {
+   const [uuid, blob_index] = blob_uuid.split(":") as [string, string];
+   return { uuid, blob_index: parseInt(blob_index) };
+};

@@ -1,8 +1,8 @@
 import { pubClient, subClient } from "./petri-connections";
-import type {
-   join_game_response_schema,
-   server_responses_schema,
-   tick_update_response_schema,
+import {
+   parse_blob_uuid,
+   type join_game_response_schema,
+   type tick_update_response_schema,
 } from "./shared_types";
 import {
    calculate_aabb,
@@ -10,106 +10,74 @@ import {
    GRID_CELL_SIZE,
    INITIAL_PLAYER_RADIUS,
    player_metadata_schema,
-   private_player_data_schema,
+   player_update_position_schema,
    SERVER_CONSTANTS,
    TICK_FPS,
    WORLD_RADIUS,
+   ZOOM_FACTOR_BASE,
 } from "./stores";
 import { z } from "zod";
 
-type PositionalPlayerData = {
+type BlobPositionalData = {
    x: number;
    y: number;
    r: number;
+   vx: number;
+   vy: number;
    minx: number;
    maxx: number;
    miny: number;
    maxy: number;
-   angle: number;
-   magnitude: number;
-   _player_cache: string[];
    _cells: Set<bigint>;
 };
+
+type PositionalPlayerData = {
+   blobs: BlobPositionalData[];
+   client_x: number;
+   client_y: number;
+   vision_minx: number;
+   vision_maxx: number;
+   vision_miny: number;
+   vision_maxy: number;
+   zoom_factor: number;
+   _player_cache: string[];
+};
+
+const stringify_blob_uuid = (uuid: string, blob_index: number): string => {
+   return `${uuid}:${blob_index}`;
+};
+
 import { Kparse, Kstringify } from "@kasssandra/kassspay";
+import type { Worker } from "bun";
 
 type PlayerUUID = string;
 
-const player_backup_data_schema = z.object({
-   x: z.number(),
-   y: z.number(),
-   r: z.number(),
-   angle: z.number(),
-   magnitude: z.number(),
-});
+const game_state_worker: Worker = new Worker(new URL("./gameStateWorker.ts", import.meta.url));
 
 export class ServerGameState {
-   private readonly grid: Map<bigint, Set<PlayerUUID>>;
+   /**
+    * Grid of cells, indexed by their hash
+    * Each cell contains a set of blob IDs (stringified)
+    * @see BlobID
+    */
+   private readonly grid: Map<bigint, Set<string>>;
    /**
     * Players in the game, indexed by their UUID
     */
    private readonly players = new Map<PlayerUUID, PositionalPlayerData>();
-   private tick_blocked = false;
 
    constructor() {
-      this.grid = new Map<bigint, Set<PlayerUUID>>();
+      this.grid = new Map<bigint, Set<string>>();
    }
 
    async start() {
-      /**
-       * Load the players into memory from backup.
-       * @TODO: Redis is not a persistent database
-       */
-      let cursor = "0";
-      do {
-         const { cursor: new_cursor, keys } = await pubClient.scan(cursor, {
-            MATCH: "player:backup:*",
-            COUNT: 1000,
-         });
-         cursor = new_cursor;
-         if (keys.length !== 0) {
-            const fetched_backups = await pubClient.mGet(keys);
-            const backups = fetched_backups
-               .map((p, i) => [keys[i]!, p])
-               .filter(([, p]) => p != null) as [string, string][];
-            for (const [player_uuid, backup] of backups) {
-               const backup_data = player_backup_data_schema.safeParse(Kparse(backup));
-               if (!backup_data.success) {
-                  global_logger.warn(
-                     "Failed to parse internal player message into player_backup_data_schema",
-                     backup,
-                  );
-                  continue;
-               }
-               const circle_aabb = calculate_aabb(
-                  backup_data.data.x,
-                  backup_data.data.y,
-                  backup_data.data.angle,
-                  backup_data.data.magnitude,
-                  backup_data.data.r,
-                  backup_data.data.r,
-               );
+      await this._joinGameListener();
+      await this._playerUpdatePositionListener();
+      await this._startTickLoop();
+   }
 
-               const cells = this._cellsIntersectingAabb({
-                  minX: circle_aabb.minX,
-                  minY: circle_aabb.minY,
-                  maxX: circle_aabb.maxX,
-                  maxY: circle_aabb.maxY,
-               });
-
-               this.players.set(player_uuid, {
-                  ...backup_data.data,
-                  minx: circle_aabb.minX,
-                  maxx: circle_aabb.maxX,
-                  miny: circle_aabb.minY,
-                  maxy: circle_aabb.maxY,
-                  _player_cache: [],
-                  _cells: cells,
-               });
-            }
-         }
-      } while (cursor !== "0");
-
-      subClient.subscribe("player:join_game", async (message) => {
+   private async _joinGameListener() {
+      await subClient.subscribe("player:join_game", async (message) => {
          const player = player_metadata_schema.safeParse(Kparse(message));
          if (!player.success) {
             global_logger.fatal(
@@ -124,7 +92,7 @@ export class ServerGameState {
             y: WORLD_RADIUS / 2 + Math.random() * 100,
          };
 
-         const circle_aabb = calculate_aabb(
+         const blob_aabb = calculate_aabb(
             starting_location.x,
             starting_location.y,
             0,
@@ -133,31 +101,42 @@ export class ServerGameState {
             INITIAL_PLAYER_RADIUS,
          );
 
-         const cells = this._cellsIntersectingAabb({
-            minX: circle_aabb.minX,
-            minY: circle_aabb.minY,
-            maxX: circle_aabb.maxX,
-            maxY: circle_aabb.maxY,
-         });
-
-         cells.forEach((k) => {
-            let cell = this.grid.get(k);
-            if (!cell) this.grid.set(k, (cell = new Set<PlayerUUID>()));
-            cell.add(player.data.uuid);
+         const blob_cells = this._cellsIntersectingAabb({
+            minX: blob_aabb.minX,
+            minY: blob_aabb.minY,
+            maxX: blob_aabb.maxX,
+            maxY: blob_aabb.maxY,
          });
 
          this.players.set(player.data.uuid, {
-            x: starting_location.x,
-            y: starting_location.y,
-            r: INITIAL_PLAYER_RADIUS,
-            minx: circle_aabb.minX,
-            maxx: circle_aabb.maxX,
-            miny: circle_aabb.minY,
-            maxy: circle_aabb.maxY,
-            angle: 0,
-            magnitude: 0,
+            blobs: [
+               {
+                  x: starting_location.x,
+                  y: starting_location.y,
+                  r: INITIAL_PLAYER_RADIUS,
+                  minx: blob_aabb.minX,
+                  maxx: blob_aabb.maxX,
+                  miny: blob_aabb.minY,
+                  maxy: blob_aabb.maxY,
+                  vx: 0,
+                  vy: 0,
+                  _cells: blob_cells,
+               },
+            ],
+            client_x: starting_location.x,
+            client_y: starting_location.y,
+            vision_minx: blob_aabb.minX,
+            vision_maxx: blob_aabb.maxX,
+            vision_miny: blob_aabb.minY,
+            vision_maxy: blob_aabb.maxY,
+            zoom_factor: ZOOM_FACTOR_BASE,
             _player_cache: [],
-            _cells: cells,
+         });
+
+         blob_cells.forEach((k) => {
+            let cell = this.grid.get(k);
+            if (!cell) this.grid.set(k, (cell = new Set<string>()));
+            cell.add(stringify_blob_uuid(player.data.uuid, 0));
          });
 
          await pubClient.publish(
@@ -173,13 +152,33 @@ export class ServerGameState {
             } satisfies z.infer<typeof join_game_response_schema>),
          );
       });
+   }
 
-      // start the tick loop
-      setInterval(() => this.tick(), 1000 / TICK_FPS);
+   private async _playerUpdatePositionListener() {
+      await subClient.subscribe("player:update_position", async (message) => {
+         const update_position = player_update_position_schema.safeParse(Kparse(message));
+         if (!update_position.success) {
+            global_logger.warn(
+               "Failed to parse internal player message into player_update_position_schema",
+               message,
+               update_position.error,
+            );
+            return;
+         }
+         const player = this.players.get(update_position.data.uuid);
+         if (player == undefined) return;
+
+         try {
+            player.client_x = update_position.data.x;
+            player.client_y = update_position.data.y;
+         } catch {
+            // player may have been deleted since the update position was sent; ignore
+         }
+      });
    }
 
    // 32 bit hash of the cell coordinates
-   private _cellHash(cx: number, cy: number): bigint {
+   private static _cellHash(cx: number, cy: number): bigint {
       const x = BigInt(cx) & 0xffffffffn;
       const y = BigInt(cy) & 0xffffffffn;
       return (x << 32n) | y;
@@ -204,171 +203,148 @@ export class ServerGameState {
       const cells = new Set<bigint>();
       for (let cy = cy1; cy <= cy2; cy++) {
          for (let cx = cx1; cx <= cx2; cx++) {
-            cells.add(this._cellHash(cx, cy));
+            cells.add(ServerGameState._cellHash(cx, cy));
          }
       }
       return cells;
    }
 
    private async _updatePlayerPositions() {
-      let cursor = "0";
-      do {
-         const { cursor: new_cursor, keys } = await pubClient.scan(cursor, {
-            MATCH: "player:private:*",
-            COUNT: 1000,
+      for (const player of this.players.values()) {
+         let player_r = 0,
+            sx = 0,
+            sy = 0,
+            sm = 0;
+         player.blobs.forEach((blob) => {
+            const dx = blob.x - player.client_x;
+            const dy = blob.y - player.client_y;
+            const magnitude = Math.max(blob.r, Math.hypot(dx, dy)) / blob.r;
+            // semi-implicit euler
+            blob.vx = dx * (1 / TICK_FPS) * magnitude;
+            blob.vy = dy * (1 / TICK_FPS) * magnitude;
+            blob.x += blob.vx;
+            blob.y += blob.vy;
+
+            const blob_aabb = calculate_aabb(blob.x, blob.y, blob.vx, blob.vy, blob.r, blob.r);
+            blob.minx = blob_aabb.minX;
+            blob.maxx = blob_aabb.maxX;
+            blob.miny = blob_aabb.minY;
+            blob.maxy = blob_aabb.maxY;
+
+            const m = blob.r * blob.r; // area-proportional mass (π cancels)
+            sx += blob.x * m;
+            sy += blob.y * m;
+            sm += m;
+
+            player_r += blob.r;
          });
-         cursor = new_cursor;
-         if (keys.length !== 0) {
-            const jobs: Promise<unknown>[] = [];
 
-            const fetched_players = await pubClient.mGet(keys);
-            const players = fetched_players
-               .map((p, i) => [keys[i]!, p])
-               .filter(([, p]) => p != null) as [string, string][];
-            for (const [private_key, player] of players) {
-               const parsed_player = private_player_data_schema.safeParse(Kparse(player));
-               if (!parsed_player.success) {
-                  global_logger.warn(
-                     "Failed to parse internal player message into private_player_data_schema",
-                     player,
-                     parsed_player.error,
-                  );
-                  continue;
-               }
-               const player_position = this.players.get(parsed_player.data.uuid);
-               if (player_position == undefined) {
-                  global_logger.warn("Player not found in players map", parsed_player.data);
-                  jobs.push(pubClient.del(private_key));
-                  continue;
-               }
+         player.zoom_factor = Math.log(player.blobs.length + player_r) + ZOOM_FACTOR_BASE;
 
-               player_position.x +=
-                  parsed_player.data.vector.magnitude * Math.cos(parsed_player.data.vector.angle);
-               player_position.y +=
-                  parsed_player.data.vector.magnitude * Math.sin(parsed_player.data.vector.angle);
-               player_position.angle = parsed_player.data.vector.angle;
-               player_position.magnitude = parsed_player.data.vector.magnitude;
+         const player_x = sx / sm;
+         const player_y = sy / sm;
+         const vision_aabb = calculate_aabb(
+            player_x,
+            player_y,
+            0,
+            0,
+            (SERVER_CONSTANTS.width / 2) * player.zoom_factor,
+            (SERVER_CONSTANTS.height / 2) * player.zoom_factor,
+         );
 
-               // calculate the aabb for the player's circle, to use for vision calculations
-               const circle_aabb = calculate_aabb(
-                  player_position.x,
-                  player_position.y,
-                  parsed_player.data.vector.angle,
-                  parsed_player.data.vector.magnitude,
-                  player_position.r,
-                  player_position.r,
-               );
-               player_position.minx = circle_aabb.minX;
-               player_position.maxx = circle_aabb.maxX;
-               player_position.miny = circle_aabb.minY;
-               player_position.maxy = circle_aabb.maxY;
-
-               // save a backup of the player data
-               jobs.push(
-                  pubClient.set(
-                     `player:backup:${parsed_player.data.uuid}`,
-                     Kstringify({
-                        x: player_position.x,
-                        y: player_position.y,
-                        r: player_position.r,
-                        angle: player_position.angle,
-                        magnitude: player_position.magnitude,
-                     } satisfies z.infer<typeof player_backup_data_schema>),
-                  ),
-               );
-            }
-            await Promise.all(jobs);
-         }
-      } while (cursor !== "0");
+         player.vision_minx = vision_aabb.minX;
+         player.vision_maxx = vision_aabb.maxX;
+         player.vision_miny = vision_aabb.minY;
+         player.vision_maxy = vision_aabb.maxY;
+      }
    }
 
    private _updatePlayerCells() {
       for (const [player_uuid, player] of this.players.entries()) {
-         const circle_cells = this._cellsIntersectingAabb({
-            minX: player.minx,
-            minY: player.miny,
-            maxX: player.maxx,
-            maxY: player.maxy,
-         });
-         let unchanged = true;
-         if (player._cells.size !== circle_cells.size) unchanged = false;
+         for (const [blob_index, blob] of player.blobs.entries()) {
+            const blob_cells = this._cellsIntersectingAabb({
+               minX: blob.minx,
+               minY: blob.miny,
+               maxX: blob.maxx,
+               maxY: blob.maxy,
+            });
+            let unchanged = true;
+            if (blob._cells.size !== blob_cells.size) unchanged = false;
+            const blob_uuid = stringify_blob_uuid(player_uuid, blob_index);
+            blob._cells.difference(blob_cells).forEach((c) => {
+               if (unchanged) {
+                  unchanged = false;
+               }
 
-         player._cells.difference(circle_cells).forEach((c) => {
-            if (unchanged) {
-               unchanged = false;
-            }
+               this.grid.get(c)?.delete(blob_uuid);
+               if (this.grid.get(c)?.size === 0) {
+                  this.grid.delete(c);
+               }
+            });
 
-            this.grid.get(c)?.delete(player_uuid);
-            if (this.grid.get(c)?.size === 0) {
-               this.grid.delete(c);
-            }
-         });
-         if (unchanged) return;
-         circle_cells.difference(player._cells).forEach((c) => {
-            if (!this.grid.has(c)) {
-               this.grid.set(c, new Set<PlayerUUID>());
-            }
-            this.grid.get(c)!.add(player_uuid);
-         });
-         player._cells = circle_cells;
+            if (unchanged) continue;
+            blob_cells.difference(blob._cells).forEach((c) => {
+               if (!this.grid.has(c)) {
+                  this.grid.set(c, new Set<string>());
+               }
+               this.grid.get(c)!.add(blob_uuid);
+            });
+            blob._cells = blob_cells;
+         }
       }
    }
 
    private async _broadcastTickUpdate() {
       const jobs: Promise<unknown>[] = [];
       for (const [player_uuid, player] of this.players.entries()) {
-         const vision_aabb = calculate_aabb(
-            player.x,
-            player.y,
-            player.angle,
-            player.magnitude,
-            player.r + SERVER_CONSTANTS.width / 2,
-            player.r + SERVER_CONSTANTS.height / 2,
-         );
+         const other_blobs: Record<
+            string,
+            z.infer<typeof tick_update_response_schema>["data"]["other_blobs"][number]
+         > = {};
 
+         // @TODO: send these players to the client for caching, using difference
+         const players_in_vision_cells = new Set<PlayerUUID>();
          const vision_cells = this._cellsIntersectingAabb({
-            minX: vision_aabb.minX,
-            minY: vision_aabb.minY,
-            maxX: vision_aabb.maxX,
-            maxY: vision_aabb.maxY,
+            minX: player.vision_minx,
+            minY: player.vision_miny,
+            maxX: player.vision_maxx,
+            maxY: player.vision_maxy,
          });
-
-         const vision_players = new Set<PlayerUUID>();
-         // send these players to the client for caching
          vision_cells.forEach((c) => {
-            this.grid.get(c)?.forEach((p) => p !== player_uuid && vision_players.add(p));
-         });
+            this.grid.get(c)?.forEach((blob_uuid) => {
+               const { uuid, blob_index } = parse_blob_uuid(blob_uuid);
+               if (uuid === player_uuid) return;
 
-         const relative_positions = Array.from(
-            vision_players
-               .entries()
-               .map(([key, value]) => ({
-                  ...this.players.get(value)!,
-                  uuid: key,
-               }))
-               .filter(
-                  (p) =>
-                     p.x >= vision_aabb.minX &&
-                     p.x <= vision_aabb.maxX &&
-                     p.y >= vision_aabb.minY &&
-                     p.y <= vision_aabb.maxY,
-               )
-               .map((p) => ({
-                  uuid: p.uuid,
-                  x: p.x - player.x,
-                  y: p.y - player.y,
-                  r: p.r,
-                  angle: p.angle,
-                  magnitude: p.magnitude,
-               })),
-         );
+               players_in_vision_cells.add(uuid);
+
+               const blob = this.players.get(uuid)!.blobs[blob_index]!;
+               if (
+                  blob.x >= player.vision_minx &&
+                  blob.x <= player.vision_maxx &&
+                  blob.y >= player.vision_miny &&
+                  blob.y <= player.vision_maxy
+               ) {
+                  other_blobs[blob_uuid] = {
+                     x: blob.x,
+                     y: blob.y,
+                     r: blob.r,
+                     vx: blob.vx,
+                     vy: blob.vy,
+                  };
+               }
+            });
+         });
 
          jobs.push(
             pubClient.publish(
                `player:${player_uuid}`,
                Kstringify({
                   method: "tick_update",
-                  data: { relative_positions },
+                  data: {
+                     self_blobs: player.blobs.map((b) => ({ x: b.x, y: b.y, r: b.r })),
+                     zoom_factor: player.zoom_factor,
+                     other_blobs,
+                  },
                } satisfies z.infer<typeof tick_update_response_schema>),
             ),
          );
@@ -377,14 +353,20 @@ export class ServerGameState {
    }
 
    private async tick() {
-      if (this.tick_blocked) {
-         global_logger.debug("Tick blocked, skipping");
-         return;
-      }
-      this.tick_blocked = true;
-      this._updatePlayerPositions();
+      // global_logger.info("Tick started", performance.now());
+      await this._updatePlayerPositions();
+      // global_logger.info("player positions updated", performance.now());
       this._updatePlayerCells();
+      // global_logger.info("player cells updated", performance.now());
       await this._broadcastTickUpdate();
-      this.tick_blocked = false;
+      // global_logger.info("tick update broadcasted", performance.now());
+   }
+   private async _startTickLoop() {
+      const tick_start_time = performance.now();
+      await this.tick();
+      const elapsed = performance.now() - tick_start_time;
+      const target = 1000 / TICK_FPS;
+      const delay = Math.max(0, target - elapsed);
+      setTimeout(() => this._startTickLoop(), delay);
    }
 }

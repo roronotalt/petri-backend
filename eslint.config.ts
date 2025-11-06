@@ -32,10 +32,15 @@ export default defineConfig([
          "no-unused-vars": "off",
          "@typescript-eslint/no-unused-vars": "warn",
          "@typescript-eslint/no-explicit-any": "warn",
+         "@typescript-eslint/no-floating-promises": "error",
       },
       languageOptions: {
          globals: {
             ...globals.node,
+         },
+         parserOptions: {
+            projectService: true,
+            tsconfigRootDir: import.meta.dirname,
          },
       },
    },

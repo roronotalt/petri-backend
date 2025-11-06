@@ -3,16 +3,18 @@ import { subClient, pubClient } from "./petri-connections/pubsub";
 import * as Sentry from "@sentry/node";
 import { z } from "zod";
 import Bun from "bun";
+import { tick_update_response_schema } from "./shared_types";
 
 /* eslint-disable @typescript-eslint/naming-convention */
 export const SERVER_CONSTANTS = {
    width: 1920,
    height: 1080,
 };
-export const TICK_FPS = 1;
-export const WORLD_RADIUS = 3000;
+export const TICK_FPS = 60;
+export const WORLD_RADIUS = 1000;
 export const INITIAL_PLAYER_RADIUS = 10;
 export const GRID_CELL_SIZE = 100;
+export const ZOOM_FACTOR_BASE = 0.25;
 /* eslint-enable @typescript-eslint/naming-convention */
 
 export enum SubscriptionType {
@@ -22,6 +24,9 @@ export enum SubscriptionType {
 
 export type WebSocketHandler = Bun.ServerWebSocket<{
    window_open: boolean;
+   game_data: {
+      uuid: string;
+   } | null;
    subscriptions: Map<
       string,
       {
@@ -44,19 +49,20 @@ export const pubsub_websocket_subscribe = async (
    await subClient.subscribe(key, func);
 };
 
+export const pubsub_websocket_unsubscribe = async (ws: WebSocketHandler, key: string) => {
+   ws.data.subscriptions.delete(key);
+   await subClient.unsubscribe(key);
+};
+
 export const player_metadata_schema = z.object({
    uuid: z.string(),
    username: z.string(),
 });
 
-export const private_player_data_schema = z.object({
+export const player_update_position_schema = z.object({
    uuid: z.string(),
-   vector: z.object({
-      angle: z.number(),
-      magnitude: z.number(),
-      client_heartbeat: z.number(),
-      server_heartbeat: z.number(),
-   }),
+   x: z.number(),
+   y: z.number(),
 });
 
 export const global_logger = new KLogger({
@@ -75,13 +81,11 @@ Sentry.init({
 export const calculate_aabb = (
    x: number,
    y: number,
-   angle: number,
-   magnitude: number,
+   vx: number,
+   vy: number,
    wr: number,
    hr: number,
 ) => {
-   const vx = magnitude * Math.cos(angle);
-   const vy = magnitude * Math.sin(angle);
    const nx = x + vx * (1 / TICK_FPS),
       ny = y + vy * (1 / TICK_FPS);
    return {
