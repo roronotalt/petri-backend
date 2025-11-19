@@ -3,7 +3,7 @@
   "semi": true,
   "trailingComma": "all",
   "printWidth": 100,
-  "tabWidth": 3,
+  "tabWidth": 2,
   "useTabs": false,
   "jsxSingleQuote": false,
   "bracketSpacing": true,
@@ -12,5 +12,6 @@
   "singleAttributePerLine": true,
   "proseWrap": "preserve",
   "quoteProps": "consistent",
-  "endOfLine": "lf"
+  "endOfLine": "lf",
+  "plugins": ["prettier-plugin-jsdoc"]
 }

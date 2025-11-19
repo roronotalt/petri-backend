@@ -1,36 +1,51 @@
 import { z } from "zod";
 
+/* eslint-disable @typescript-eslint/naming-convention */
+export const CLIENT_WIDTH_PIXELS = 1920;
+export const CLIENT_HEIGHT_PIXELS = 1080;
+/* eslint-enable @typescript-eslint/naming-convention */
+
+export const world_border_schema = z.array(z.tuple([z.number(), z.number()]));
+
 export const join_game_response_schema = z.object({
    method: z.literal("join_game"),
    data: z.object({
       x: z.number(),
       y: z.number(),
       r: z.number(),
-      world_r: z.number(),
+      world_border: world_border_schema,
+      zoom_factor: z.number(),
    }),
 });
+
+export const self_blobs_schema = z.array(
+   z.object({
+      x: z.number(),
+      y: z.number(),
+      r: z.number(),
+   }),
+);
+
+export const other_blobs_schema = z.record(
+   z.string(),
+   z.object({
+      x: z.number(),
+      y: z.number(),
+      r: z.number(),
+      vx: z.number(),
+      vy: z.number(),
+   }),
+);
 
 export const tick_update_response_schema = z.object({
    method: z.literal("tick_update"),
    data: z.object({
+      com_x: z.number(),
+      com_y: z.number(),
       zoom_factor: z.number(),
-      self_blobs: z.array(
-         z.object({
-            x: z.number(),
-            y: z.number(),
-            r: z.number(),
-         }),
-      ),
-      other_blobs: z.record(
-         z.string(),
-         z.object({
-            x: z.number(),
-            y: z.number(),
-            r: z.number(),
-            vx: z.number(),
-            vy: z.number(),
-         }),
-      ),
+      world_border: world_border_schema,
+      self_blobs: self_blobs_schema,
+      other_blobs: other_blobs_schema,
    }),
 });
 
@@ -73,18 +88,23 @@ export const server_methods_schema = z.discriminatedUnion("method", [
       params: client_join_game_schema,
    }),
    z.object({
-      id: z.string().max(100),
       method: z.literal("update_position"),
       params: client_update_position_schema,
    }),
 ]);
 
-export type BlobUUID = {
-   uuid: string;
-   blob_index: number; // blob array index
-};
+export const food_schema = z.object({
+   type: z.literal("food"),
+   x: z.number(),
+   y: z.number(),
+   r: z.number(),
+});
 
-export const parse_blob_uuid = (blob_uuid: string): BlobUUID => {
-   const [uuid, blob_index] = blob_uuid.split(":") as [string, string];
-   return { uuid, blob_index: parseInt(blob_index) };
-};
+export const virus_schema = z.object({
+   type: z.literal("virus"),
+   x: z.number(),
+   y: z.number(),
+   r: z.number(),
+});
+
+export const world_object_schema = z.discriminatedUnion("type", [food_schema, virus_schema]);

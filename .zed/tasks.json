@@ -1,0 +1,20 @@
+[
+  {
+    "label": "backend dev",
+    "reveal": "no_focus",
+    "command": "bun run dev",
+    "use_new_terminal": false,
+    "shell": {
+      "program": "bash"
+    }
+  },
+  {
+    "label": "backend install",
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "command": "bun install && bun update",
+    "shell": {
+      "program": "bash"
+    }
+  }
+]
