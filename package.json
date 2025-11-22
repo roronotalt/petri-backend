@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun --hot src/index.ts",
+    "dev": "bun --watch src/index.ts",
     "dev:watch-all": "bun --watch src/**/*.ts --run src/index.ts",
     "start": "bun src/index.ts"
   },

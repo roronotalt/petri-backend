@@ -18,7 +18,6 @@ import {
   CLIENT_WIDTH_PIXELS,
   server_methods_schema,
   server_responses_schema,
-  world_border_schema,
 } from "./shared_types";
 import { player_metadata_schema } from "./stores";
 import { ServerGameState } from "./serverGameState";
@@ -59,63 +58,6 @@ if (process.env.TICK_SERVER == "YES") {
   await server_game_state.start();
 }
 
-const world_border_segments = (
-  com_x: number,
-  com_y: number,
-  world_radius: number,
-): z.infer<typeof world_border_schema> => {
-  const drawable_y = (value: number): boolean => value >= 0 && value < CLIENT_HEIGHT_PIXELS;
-  const drawable_x = (value: number): boolean => value >= 0 && value < CLIENT_WIDTH_PIXELS;
-
-  const segments: z.infer<typeof world_border_schema> = [];
-  const borders: [number, number, number, number] = [
-    com_y - world_radius + CLIENT_HEIGHT_PIXELS / 2, // top
-    -com_x + world_radius + CLIENT_WIDTH_PIXELS / 2, //  right
-    com_y + world_radius + CLIENT_HEIGHT_PIXELS / 2, // bottom
-    -com_x - world_radius + CLIENT_WIDTH_PIXELS / 2, //  left
-  ];
-  const drawable_borders = borders.map((border, index) =>
-    index % 2 === 0 ? drawable_y(border) : drawable_x(border),
-  );
-
-  // draw in reverse order (bottom to top to right)
-  if (drawable_borders[0] && drawable_borders[3] && !drawable_borders[1] && !drawable_borders[2]) {
-    segments.push([borders[3], CLIENT_HEIGHT_PIXELS]);
-    segments.push([borders[3], borders[0]]);
-    segments.push([CLIENT_WIDTH_PIXELS, borders[0]]);
-
-    return segments;
-  }
-
-  if (drawable_borders[0]) {
-    segments.push([drawable_borders[3] ? borders[3] : 0, borders[0]]);
-    segments.push([drawable_borders[1] ? borders[1] : CLIENT_WIDTH_PIXELS, borders[0]]);
-  }
-
-  if (drawable_borders[1]) {
-    if (!drawable_borders[0]) {
-      segments.push([borders[1], 0]);
-    }
-    segments.push([borders[1], drawable_borders[2] ? borders[2] : CLIENT_HEIGHT_PIXELS]);
-  }
-
-  if (drawable_borders[2]) {
-    if (!drawable_borders[1]) {
-      segments.push([CLIENT_WIDTH_PIXELS, borders[2]]);
-    }
-    segments.push([drawable_borders[3] ? borders[3] : 0, borders[2]]);
-  }
-
-  if (drawable_borders[3]) {
-    if (!drawable_borders[2]) {
-      segments.push([borders[3], CLIENT_HEIGHT_PIXELS]);
-    }
-    segments.push([borders[3], drawable_borders[0] ? borders[0] : 0]);
-  }
-
-  return segments;
-};
-
 const join_game = async (
   ws: WebSocketHandler,
   sub_id: string,
@@ -149,11 +91,29 @@ const join_game = async (
           ...parsed_message,
           data: {
             ...parsed_message.data,
-            world_border: world_border_segments(
-              parsed_message.data.x,
-              parsed_message.data.y,
-              WORLD_RADIUS,
-            ),
+            self_blobs: parsed_message.data.self_blobs.map((blob) => ({
+              ...blob,
+              x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
+              y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
+            })),
+            world_objects: parsed_message.data.world_objects.map(([key, object]) => [
+              key,
+              {
+                ...object,
+                x: object.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
+                y: parsed_message.data.com_y - object.y + CLIENT_HEIGHT_PIXELS / 2,
+                r: object.r,
+              },
+            ]),
+            other_blobs: parsed_message.data.other_blobs.map(([key, blob]) => [
+              key,
+              {
+                ...blob,
+                x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
+                y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
+                r: blob.r,
+              },
+            ]),
           },
         };
         ws.data.game_data = {
@@ -169,6 +129,7 @@ const join_game = async (
           .exec();
         break;
       case "tick_update": {
+        // convert to relative coordinates
         processed_message = {
           ...parsed_message,
           data: {
@@ -178,22 +139,24 @@ const join_game = async (
               x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
               y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
             })),
-            other_blobs: Object.fromEntries(
-              Object.entries(parsed_message.data.other_blobs).map(([key, blob]) => [
-                key,
-                {
-                  ...blob,
-                  x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
-                  y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
-                  r: blob.r,
-                },
-              ]),
-            ),
-            world_border: world_border_segments(
-              parsed_message.data.com_x,
-              parsed_message.data.com_y,
-              WORLD_RADIUS,
-            ),
+            world_objects: parsed_message.data.world_objects.map(([key, object]) => [
+              key,
+              {
+                ...object,
+                x: object.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
+                y: parsed_message.data.com_y - object.y + CLIENT_HEIGHT_PIXELS / 2,
+                r: object.r,
+              },
+            ]),
+            other_blobs: parsed_message.data.other_blobs.map(([key, blob]) => [
+              key,
+              {
+                ...blob,
+                x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
+                y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
+                r: blob.r,
+              },
+            ]),
           },
         };
         break;

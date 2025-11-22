@@ -68,6 +68,7 @@ export default defineConfig([
           definedTags: ["remarks"],
         },
       ],
+      "jsdoc/tag-lines": ["warn", "any", { startLines: 1 }],
     },
     languageOptions: {
       globals: {
