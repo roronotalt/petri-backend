@@ -39,6 +39,8 @@ export default defineConfig([
       "@typescript-eslint/no-unused-vars": "warn",
       "@typescript-eslint/no-explicit-any": "warn",
       "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-shadow": "warn",
+
       // jsdoc
       "jsdoc/require-jsdoc": [
         "warn",

@@ -30,7 +30,7 @@ import {
   sweeping_aabb,
   TPS,
   WORLD_RADIUS,
-  ZOOM_FACTOR_BASE,
+  SCALE_BASE,
   type BoundingBox,
 } from "./stores";
 import { Kparse, Kstringify } from "@kasssandra/kassspay";
@@ -43,10 +43,7 @@ type Blob = {
   r: number;
   vx: number;
   vy: number;
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
+  aabb: BoundingBox;
   _cells: Set<bigint>;
 };
 
@@ -62,8 +59,9 @@ type Player = {
   _player_cache: string[];
 };
 
-type ServerWorldObject = z.infer<typeof world_object_schema> &
-  z.infer<typeof bounding_box_schema> & { _cells: Set<bigint> };
+type ServerWorldObject = z.infer<typeof world_object_schema> & {
+  aabb: z.infer<typeof bounding_box_schema>;
+} & { _cells: Set<bigint> };
 
 /**
  * @param entity_uuid Entity uuid object
@@ -147,6 +145,19 @@ export class ServerGameState {
   }
 
   /**
+   * Calculates player scale based on radius
+   *
+   * @remarks
+   *   Counts on intitial player radius being minium
+   * @param r Player radius
+   * @returns Player vision scalar
+   * @see INITIAL_PLAYER_RADIUS
+   */
+  private static _calculatePlayerScale(r: number): number {
+    return Math.log(r) / 100 + 0.03;
+  }
+
+  /**
    * @param a Arbitrary bounding box
    * @param b Arbitrary bounding box
    * @returns True if a and b overlap
@@ -196,7 +207,7 @@ export class ServerGameState {
   ):
     | {
         success: true;
-        location: { x: number; y: number; _cells: Set<bigint> } & BoundingBox;
+        location: { x: number; y: number; _cells: Set<bigint>; aabb: BoundingBox };
       }
     | {
         success: false;
@@ -228,13 +239,13 @@ export class ServerGameState {
 
         return {
           success: true,
-          location: { ...aabb!, x, y, _cells: new Set([empty_cell_hash]) },
+          location: { aabb: aabb!, x, y, _cells: new Set([empty_cell_hash]) },
         };
       }
 
-      const ajusted_world_radius = WORLD_RADIUS - radius;
-      const x = ajusted_world_radius * Math.random() - ajusted_world_radius / 2;
-      const y = ajusted_world_radius * Math.random() - ajusted_world_radius / 2;
+      const ajusted_world_diameter = 2 * WORLD_RADIUS - radius;
+      const x = ajusted_world_diameter * Math.random() - ajusted_world_diameter / 2;
+      const y = ajusted_world_diameter * Math.random() - ajusted_world_diameter / 2;
 
       aabb = calculate_aabb(
         x,
@@ -248,33 +259,34 @@ export class ServerGameState {
       for (const cell_hash of cell_hashes) {
         const cell = this.grid.get(cell_hash);
         // flag empty cell for next attempt but continue checking this coordinate
-        if (!cell) {
+        if (cell === undefined) {
           empty_cell_hash = cell_hash;
           continue;
         }
 
         for (const unparsed_entity_uuid of cell) {
           const entity_uuid = parse_entity_type_uuid(unparsed_entity_uuid);
-          const world_object = this.world_objects.get(entity_uuid.uuid);
-
-          // if the entity type is a player then do not worry about spawning them in with collisions with food
-          if (
-            entity == Entity.PLAYER_BLOB &&
-            entity_uuid.type === EntityType.WORLD_OBJECT &&
-            world_object?.type === Entity.FOOD
-          ) {
-            continue;
-          }
 
           if (entity_uuid.type === EntityType.PLAYER_BLOB) {
             const blob = this.players.get(entity_uuid.uuid)!.blobs[entity_uuid.blob_index]!;
-            if (ServerGameState._overlaps(blob, aabb)) {
+            if (ServerGameState._overlaps(blob.aabb, aabb)) {
               continue collision_free_attempt;
             }
             continue;
           }
 
-          if (ServerGameState._overlaps(world_object!, aabb)) {
+          const world_object = this.world_objects.get(entity_uuid.uuid)!;
+
+          // if the entity type is a player then do not worry about spawning them in with collisions with food
+          if (
+            entity == Entity.PLAYER_BLOB &&
+            entity_uuid.type === EntityType.WORLD_OBJECT &&
+            world_object.type === Entity.FOOD
+          ) {
+            continue;
+          }
+
+          if (ServerGameState._overlaps(world_object.aabb, aabb)) {
             continue collision_free_attempt;
           }
         }
@@ -282,7 +294,7 @@ export class ServerGameState {
 
       return {
         success: true,
-        location: { ...aabb, x, y, _cells: cell_hashes },
+        location: { aabb, x, y, _cells: cell_hashes },
       };
     }
     return {
@@ -319,16 +331,15 @@ export class ServerGameState {
             if (visible_other_blobs_uuid.has(entity_uuid.uuid)) continue;
             if (entity_uuid.uuid === player_uuid) continue;
 
-            player_metadata.add(entity_uuid.uuid);
+            const other_player = this.players.get(entity_uuid.uuid);
 
-            const player = this.players.get(entity_uuid.uuid);
-
-            if (player === undefined) {
+            if (other_player === undefined) {
               game_server_logger.warn(`Player ${entity_uuid.uuid} not found`);
               continue;
             }
 
-            const blob = player.blobs[entity_uuid.blob_index];
+            const blob = other_player.blobs[entity_uuid.blob_index];
+            player_metadata.add(entity_uuid.uuid);
 
             if (blob === undefined) {
               game_server_logger.warn(
@@ -337,7 +348,7 @@ export class ServerGameState {
               continue;
             }
 
-            if (!ServerGameState._overlaps(player.vision_aabb, blob)) continue;
+            if (!ServerGameState._overlaps(player.vision_aabb, blob.aabb)) continue;
 
             visible_other_blobs_uuid.add(entity_uuid.uuid);
             visible_other_blobs.push({
@@ -350,7 +361,7 @@ export class ServerGameState {
             break;
           }
           case EntityType.WORLD_OBJECT: {
-            if (visible_other_blobs_uuid.has(entity_uuid.uuid)) continue;
+            if (visible_world_objects_uuid.has(entity_uuid.uuid)) continue;
             const world_object = this.world_objects.get(entity_uuid.uuid);
             if (!world_object) {
               game_server_logger.warn(
@@ -359,7 +370,7 @@ export class ServerGameState {
               continue;
             }
 
-            if (!ServerGameState._overlaps(player.vision_aabb, world_object)) continue;
+            if (!ServerGameState._overlaps(player.vision_aabb, world_object.aabb)) continue;
 
             visible_world_objects_uuid.add(entity_uuid.uuid);
             visible_world_objects.push({
@@ -433,12 +444,13 @@ export class ServerGameState {
         global_logger.error(`Failed to find a collision-free location for player ${player_uuid}`);
         continue;
       }
+      const zoom_factor = ServerGameState._calculatePlayerScale(INITIAL_PLAYER_RADIUS);
 
       const vision_aabb = calculate_aabb(
         starting_location.location.x,
         starting_location.location.y,
-        (CLIENT_WIDTH_PIXELS / 2) * ZOOM_FACTOR_BASE,
-        (CLIENT_HEIGHT_PIXELS / 2) * ZOOM_FACTOR_BASE,
+        (CLIENT_WIDTH_PIXELS / 2) * zoom_factor,
+        (CLIENT_HEIGHT_PIXELS / 2) * zoom_factor,
       );
 
       this.players.set(player_uuid, {
@@ -455,7 +467,7 @@ export class ServerGameState {
         com_x: starting_location.location.x,
         com_y: starting_location.location.y,
         vision_aabb,
-        zoom_factor: ZOOM_FACTOR_BASE,
+        zoom_factor: zoom_factor,
         _player_cache: [],
       });
 
@@ -483,7 +495,7 @@ export class ServerGameState {
               world_radius: WORLD_RADIUS,
               other_blobs: visible_entries.other_blobs,
               world_objects: visible_entries.world_objects,
-              zoom_factor: ZOOM_FACTOR_BASE,
+              zoom_factor: zoom_factor,
             },
           } satisfies z.infer<typeof internal_join_game_response_schema>),
         ),
@@ -521,7 +533,6 @@ export class ServerGameState {
       }
 
       const food_uuid = crypto.randomUUID();
-
       this.world_objects.set(food_uuid, {
         ...collision_free_location.location,
         r: food_radius,
@@ -550,59 +561,93 @@ export class ServerGameState {
       if (player == undefined) return;
 
       try {
-        player.client_x = update_position.data.x;
-        player.client_y = update_position.data.y;
+        player.client_x = (update_position.data.x - CLIENT_WIDTH_PIXELS / 2) * player.zoom_factor;
+        player.client_y = (update_position.data.y - CLIENT_HEIGHT_PIXELS / 2) * player.zoom_factor;
       } catch {
         // player may have been deleted since the update position was sent; ignore
       }
     });
   }
 
-  private _updatePlayersPositions(dt: number) {
-    for (const player of this.players.values()) {
-      let linear_radius = 0,
+  /**
+   * Update a players com coordiantes, blob coordinates, and cells
+   *
+   * @param dt Delta time
+   */
+  private _updatePlayersLocations(dt: number) {
+    for (const [player_uuid, player] of this.players.entries()) {
+      let radius = 0,
         total_mass = 0,
         total_x = 0,
         total_y = 0;
-      player.blobs.forEach((blob) => {
-        const blob_world_x = player.com_x + player.client_x - CLIENT_WIDTH_PIXELS / 2;
-        const blob_world_y = player.com_y - player.client_y + CLIENT_HEIGHT_PIXELS / 2;
+
+      for (const [blob_index, blob] of player.blobs.entries()) {
+        // update blob position
+        const blob_world_x = player.com_x + player.client_x;
+        const blob_world_y = player.com_y - player.client_y;
         let dx = blob_world_x - blob.x;
         let dy = blob_world_y - blob.y;
 
         const mass = blob.r * blob.r;
-        const magnitude_squared = dx * dx + dy * dy;
+        const magnitude_sq = dx * dx + dy * dy;
 
-        if (magnitude_squared != 0) {
-          if (magnitude_squared > mass) {
-            const n = blob.r / Math.sqrt(magnitude_squared);
+        if (magnitude_sq != 0) {
+          if (magnitude_sq > mass) {
+            const n = blob.r / Math.sqrt(magnitude_sq);
             dx *= n;
             dy *= n;
           }
         }
-
         blob.x = Math.max(
-          Math.min(blob.x + dx * dt * 100, WORLD_RADIUS - blob.r),
+          Math.min(blob.x + dx * dt * TPS, WORLD_RADIUS - blob.r),
           -WORLD_RADIUS + blob.r,
         );
         blob.y = Math.max(
-          Math.min(blob.y + dy * dt * 100, WORLD_RADIUS - blob.r),
+          Math.min(blob.y + dy * dt * TPS, WORLD_RADIUS - blob.r),
           -WORLD_RADIUS + blob.r,
         );
 
         const blob_aabb = sweeping_aabb(blob.x, blob.y, blob.vx, blob.vy, blob.r, blob.r);
-        blob.minX = blob_aabb.minX;
-        blob.maxX = blob_aabb.maxX;
-        blob.minY = blob_aabb.minY;
-        blob.maxY = blob_aabb.maxY;
+        blob.aabb = blob_aabb;
 
+        // update variables updated to calculate COM
         total_x += blob.x * mass;
         total_y += blob.y * mass;
-        linear_radius += blob.r;
+        radius += blob.r;
         total_mass += mass;
-      });
 
-      player.zoom_factor = Math.log(linear_radius - INITIAL_PLAYER_RADIUS + 1) + ZOOM_FACTOR_BASE;
+        // update cells for blob
+        const blob_cells = this._cellsIntersectingAabb(blob_aabb);
+        let unchanged = true;
+        if (blob._cells.size !== blob_cells.size) unchanged = false;
+        const blob_uuid = stringify_entity_type_uuid({
+          type: EntityType.PLAYER_BLOB,
+          uuid: player_uuid,
+          blob_index,
+        });
+        blob._cells.difference(blob_cells).forEach((c) => {
+          if (unchanged) {
+            unchanged = false;
+          }
+
+          const old_cell = this.grid.get(c)!;
+          old_cell.delete(blob_uuid);
+          if (old_cell.size === 0) {
+            this.grid.delete(c);
+          }
+        });
+
+        if (unchanged) continue;
+        blob_cells.difference(blob._cells).forEach((c) => {
+          if (!this.grid.has(c)) {
+            this.grid.set(c, new Set<string>());
+          }
+          this.grid.get(c)!.add(blob_uuid);
+        });
+        blob._cells = blob_cells;
+      }
+
+      player.zoom_factor = ServerGameState._calculatePlayerScale(radius);
 
       player.com_x = total_x / total_mass;
       player.com_y = total_y / total_mass;
@@ -618,41 +663,34 @@ export class ServerGameState {
     }
   }
 
-  private _updatePlayersCells() {
+  /** Collision logic */
+  private _updateCollisions() {
     for (const [player_uuid, player] of this.players.entries()) {
       for (const [blob_index, blob] of player.blobs.entries()) {
-        const blob_cells = this._cellsIntersectingAabb({
-          minX: blob.minX,
-          minY: blob.minY,
-          maxX: blob.maxX,
-          maxY: blob.maxY,
-        });
-        let unchanged = true;
-        if (blob._cells.size !== blob_cells.size) unchanged = false;
         const blob_uuid = stringify_entity_type_uuid({
           type: EntityType.PLAYER_BLOB,
-          uuid: player_uuid,
           blob_index,
+          uuid: player_uuid,
         });
-        blob._cells.difference(blob_cells).forEach((c) => {
-          if (unchanged) {
-            unchanged = false;
+        for (const cell_hash of blob._cells) {
+          const cell = this.grid.get(cell_hash)!;
+          // remove the cell for there is no more reason to check collisions with it this tick
+          cell.delete(blob_uuid);
+          for (const entity_uuid of cell) {
+            const entity = parse_entity_type_uuid(entity_uuid);
+            switch (entity.type) {
+              case EntityType.PLAYER_BLOB:
+                const other_player = this.players.get(entity.uuid)!;
+                if (other_player) {
+                  // Handle collision logic here
+                }
+                break;
+              case EntityType.WORLD_OBJECT:
+                // @TODO
+                break;
+            }
           }
-
-          this.grid.get(c)?.delete(blob_uuid);
-          if (this.grid.get(c)?.size === 0) {
-            this.grid.delete(c);
-          }
-        });
-
-        if (unchanged) continue;
-        blob_cells.difference(blob._cells).forEach((c) => {
-          if (!this.grid.has(c)) {
-            this.grid.set(c, new Set<string>());
-          }
-          this.grid.get(c)!.add(blob_uuid);
-        });
-        blob._cells = blob_cells;
+        }
       }
     }
   }
@@ -690,13 +728,9 @@ export class ServerGameState {
   private async _tick(dt: number) {
     // global_logger.info("Tick started", performance.now());
     this._spawnFood();
-    await this._spawnPlayer();
-    this._updatePlayersPositions(dt);
+    this._updatePlayersLocations(dt);
     // global_logger.info("player positions updated", performance.now());
-    this._updatePlayersCells();
-    // global_logger.info("player cells updated", performance.now());
-    await this._broadcastTickUpdate();
-    // global_logger.info("tick update broadcasted", performance.now());
+    await Promise.all([this._spawnPlayer(), this._broadcastTickUpdate()]);
   }
 
   private async _startTickLoop(prev_tick_time: number) {

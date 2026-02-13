@@ -8,25 +8,30 @@ import { join_game_response_schema, tick_update_response_schema } from "./shared
 /* eslint-disable @typescript-eslint/naming-convention */
 /** Game server ticks per second */
 export const TPS = 60;
+
 /** In pixels */
-export const WORLD_RADIUS = 1000;
+export const INITIAL_PLAYER_RADIUS = 1;
+
+/**
+ * In pixels, grid lines align better when this is a multiple of INITIAL_PLAYER_RADIUS
+ *
+ * @see INITIAL_PLAYER_RADIUS
+ */
+export const WORLD_RADIUS = INITIAL_PLAYER_RADIUS * 100;
 /**
  * Multiplicative factor by which player view is "zoomed" in. server calculates this value to ajust
  * perspective and vision aabb for a player.
  */
-export const ZOOM_FACTOR_BASE = 0.25;
-
-/** In pixels */
-export const INITIAL_PLAYER_RADIUS = 20;
+export const SCALE_BASE = 0.25;
 /** In pixels */
 export const GRID_CELL_SIZE = 100;
 /** Minimum distance between an entity and all other entities when spanwin in. In pixels. */
-export const MIN_SEPERATION_DISTANCE = 3;
+export const MIN_SEPERATION_DISTANCE = 20;
 
 /** In pixels */
-export const MINIMUM_FOOD_RADIUS = 3;
+export const MINIMUM_FOOD_RADIUS = 0.1;
 /** In pixels */
-export const MAXIMUM_FOOD_RADIUS = 5;
+export const MAXIMUM_FOOD_RADIUS = 1.1;
 /**
  * Maximum number of cascading failures to spawn food before giving up per-tick
  *

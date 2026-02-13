@@ -135,30 +135,43 @@ const join_game = async (
           data: {
             ...parsed_message.data,
             self_blobs: parsed_message.data.self_blobs.map((blob) => ({
-              ...blob,
-              x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
-              y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
+              x:
+                (blob.x - parsed_message.data.com_x) / parsed_message.data.zoom_factor +
+                CLIENT_WIDTH_PIXELS / 2,
+              y:
+                (parsed_message.data.com_y - blob.y) / parsed_message.data.zoom_factor +
+                CLIENT_HEIGHT_PIXELS / 2,
+              r: blob.r / parsed_message.data.zoom_factor,
             })),
             world_objects: parsed_message.data.world_objects.map(([key, object]) => [
               key,
               {
                 ...object,
-                x: object.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
-                y: parsed_message.data.com_y - object.y + CLIENT_HEIGHT_PIXELS / 2,
-                r: object.r,
+                x:
+                  (object.x - parsed_message.data.com_x) / parsed_message.data.zoom_factor +
+                  CLIENT_WIDTH_PIXELS / 2,
+                y:
+                  (parsed_message.data.com_y - object.y) / parsed_message.data.zoom_factor +
+                  CLIENT_HEIGHT_PIXELS / 2,
+                r: object.r / parsed_message.data.zoom_factor,
               },
             ]),
             other_blobs: parsed_message.data.other_blobs.map(([key, blob]) => [
               key,
               {
                 ...blob,
-                x: blob.x - parsed_message.data.com_x + CLIENT_WIDTH_PIXELS / 2,
-                y: parsed_message.data.com_y - blob.y + CLIENT_HEIGHT_PIXELS / 2,
-                r: blob.r,
+                x:
+                  (blob.x - parsed_message.data.com_x) / parsed_message.data.zoom_factor +
+                  CLIENT_WIDTH_PIXELS / 2,
+                y:
+                  (parsed_message.data.com_y - blob.y) / parsed_message.data.zoom_factor +
+                  CLIENT_HEIGHT_PIXELS / 2,
+                r: blob.r / parsed_message.data.zoom_factor,
               },
             ]),
           },
         };
+
         break;
       }
     }
